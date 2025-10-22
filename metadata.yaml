@@ -1,5 +1,5 @@
 name: llm_failover
-desc: AstrBot 文本类大模型故障转移插件
+desc: AstrBot 文本类大模型故障转移插件，遇到限速/瞬时故障时自动切换备用模型
 version: v1.0.0
-author: Wanbot Team
-repo: https://example.com/wanbot/llm_failover
+author: 万一 (https://github.com/Ryan7t)
+repo: https://github.com/Ryan7t/astrbot_plugin_llm_failover
