@@ -1,5 +1,5 @@
-name: llm_failover
-desc: AstrBot 文本类大模型故障转移插件，遇到限速/瞬时故障时自动切换备用模型
+name: astrbot_plugin_llm_failover
+desc: AstrBot 文本类大模型故障转移插件，遇到限速/瞬时故障时自动切换备用模型，比如“硅基流动”免费模型的速率限制
 version: v1.0.0
-author: 万一 (https://github.com/Ryan7t)
+author: 万一
 repo: https://github.com/Ryan7t/astrbot_plugin_llm_failover
