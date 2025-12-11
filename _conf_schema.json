@@ -1,0 +1,8 @@
+{
+  "provider_order": {
+    "description": "故障转移顺序（自定义模型提供商的完整排序）",
+    "type": "list",
+    "hint": "指定所有聊天类 Provider 的尝试顺序，必须包含所有可用的模型提供商 ID。留空则使用当前激活的 Provider 作为首选，其余顺序不确定。",
+    "default": []
+  }
+}
