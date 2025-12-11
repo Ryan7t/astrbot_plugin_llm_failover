@@ -1,0 +1,26 @@
+{
+  "enabled": {
+    "description": "是否启用故障转移功能",
+    "type": "bool",
+    "hint": "启用后将为所有聊天类模型提供商添加故障转移能力",
+    "default": true
+  },
+  "provider_order": {
+    "description": "故障转移顺序（提供商ID列表）",
+    "type": "list",
+    "hint": "按优先级从高到低排列提供商ID。留空时使用框架默认顺序。支持完全自定义首选提供商及备选顺序，不依赖框架的 primary 设置。",
+    "default": []
+  },
+  "log_enabled": {
+    "description": "是否启用详细日志",
+    "type": "bool",
+    "hint": "启用后将记录每次故障转移的详细过程到 llm_failover.log 文件",
+    "default": true
+  },
+  "retry_delay": {
+    "description": "故障重试延迟（秒）",
+    "type": "float",
+    "hint": "在切换到下一个提供商前的等待时间，默认为0秒（立即切换）",
+    "default": 0.0
+  }
+}
