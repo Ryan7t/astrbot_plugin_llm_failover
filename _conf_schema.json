@@ -1,0 +1,8 @@
+{
+  "provider_order": {
+    "description": "故障转移提供商顺序",
+    "type": "list",
+    "hint": "按优先级从高到低排列提供商ID。留空则使用框架默认顺序。例如：[\"deepseek\", \"openai\", \"claude\"]",
+    "default": []
+  }
+}

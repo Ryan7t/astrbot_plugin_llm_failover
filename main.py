@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from astrbot.api import logger as astr_logger
+from astrbot.api import AstrBotConfig, logger as astr_logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.entities import LLMResponse, ProviderType
@@ -15,11 +15,20 @@ from astrbot.core.provider.entities import LLMResponse, ProviderType
     "llm_failover",
     "Wanbot Team",
     "为聊天类模型提供商添加自动故障转移能力",
-    "1.0.0",
+    "1.0.2",
 )
 class LLMFailoverPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
+        """初始化故障转移插件。
+
+        Args:
+            context: AstrBot 上下文对象，提供框架核心组件访问能力。
+            config: 插件配置对象，包含用户自定义的故障转移提供商顺序。
+        """
         super().__init__(context)
+        # 插件配置，包含用户定义的 provider_order 列表
+        self.config = config
+        # 日志文件路径
         self._log_path = Path(__file__).resolve().parent / "llm_failover.log"
         self._log("LLM Failover 插件初始化，准备安装故障转移包装。")
         self._install_provider_failover()
@@ -44,6 +53,11 @@ class LLMFailoverPlugin(Star):
         self._log(f"[LLM切换] {message}")
 
     def _install_provider_failover(self):
+        """为所有聊天类提供商安装故障转移包装器。
+
+        遍历所有 CHAT_COMPLETION 类型的提供商,替换其 text_chat 和
+        text_chat_stream 方法为故障转移包装版本。已包装的提供商会跳过。
+        """
         try:
             providers = [
                 provider
@@ -62,11 +76,12 @@ class LLMFailoverPlugin(Star):
             text_wrapped = getattr(provider, "_llm_failover_text_wrapped", False)
             stream_wrapped = getattr(provider, "_llm_failover_stream_wrapped", False)
 
+            # 缓存原始 text_chat 方法,便于故障转移时调用
             if not hasattr(provider, "_llm_failover_original_text_chat"):
                 provider._llm_failover_original_text_chat = provider.text_chat
 
             if not text_wrapped:
-                # 仅替换普通聊天方法，保留原始实现以便切回或调试。
+                # 替换普通聊天方法为故障转移包装器
                 async def wrapper(p_self, *args, **kwargs):
                     return await self._execute_with_failover(p_self, *args, **kwargs)
 
@@ -74,6 +89,7 @@ class LLMFailoverPlugin(Star):
                 provider._llm_failover_text_wrapped = True
 
             if hasattr(provider, "text_chat_stream") and not stream_wrapped:
+                # 缓存原始流式聊天方法
                 if not hasattr(
                     provider, "_llm_failover_original_text_chat_stream"
                 ):
@@ -81,7 +97,7 @@ class LLMFailoverPlugin(Star):
                         provider.text_chat_stream
                     )
 
-                # 为流式聊天单独包装，避免流途中异常时无法切换。
+                # 替换流式聊天方法为故障转移包装器
                 async def stream_wrapper(p_self, *args, **kwargs):
                     async for chunk in self._execute_stream_with_failover(
                         p_self, *args, **kwargs
@@ -93,6 +109,7 @@ class LLMFailoverPlugin(Star):
                 )
                 provider._llm_failover_stream_wrapped = True
 
+            # 标记提供商已安装故障转移
             if getattr(provider, "_llm_failover_text_wrapped", False) or getattr(
                 provider, "_llm_failover_stream_wrapped", False
             ):
@@ -120,20 +137,52 @@ class LLMFailoverPlugin(Star):
             self._log_failover(f"提供商 {provider_id} 响应预览: {preview}")
 
     def _iter_fallback_providers(self, primary):
+        """根据配置构建故障转移提供商顺序。
+
+        Args:
+            primary: 当前主调用的提供商实例。
+
+        Returns:
+            按优先级排序的提供商列表。如果配置了 provider_order,
+            则严格按配置顺序排列;否则采用框架默认顺序(primary 优先)。
+        """
+        # 获取所有聊天类提供商
         providers = [
             provider
             for provider in self.context.get_all_providers()
             if provider.meta().provider_type == ProviderType.CHAT_COMPLETION
         ]
-        order = []
-        if primary:
-            order.append(primary)
-        for provider in providers:
-            if provider is primary:
-                continue
-            if provider not in order:
-                order.append(provider)
-        return order if order else [primary]
+
+        # 读取用户配置的提供商顺序
+        custom_order = self.config.get("provider_order", []) if self.config else []
+
+        if custom_order:
+            # 使用自定义顺序:按配置中的 ID 顺序重新排列提供商
+            provider_map = {
+                provider.provider_config.get("id", ""): provider
+                for provider in providers
+            }
+            ordered = []
+            for pid in custom_order:
+                if pid in provider_map:
+                    ordered.append(provider_map[pid])
+            # 将配置中未列出的提供商追加到末尾
+            for provider in providers:
+                if provider not in ordered:
+                    ordered.append(provider)
+            self._log_failover(f"使用自定义顺序: {custom_order}")
+            return ordered if ordered else [primary]
+        else:
+            # 框架默认顺序:primary 优先,其余提供商按框架返回顺序排列
+            order = []
+            if primary:
+                order.append(primary)
+            for provider in providers:
+                if provider is primary:
+                    continue
+                if provider not in order:
+                    order.append(provider)
+            return order if order else [primary]
 
     def _get_prompt_preview(self, args: tuple, kwargs: dict) -> str:
         if args:
@@ -143,7 +192,19 @@ class LLMFailoverPlugin(Star):
         return ""
 
     def _should_failover(self, exc: Exception) -> bool:
+        """判断异常是否应触发故障转移。
+
+        Args:
+            exc: 捕获的异常对象。
+
+        Returns:
+            True 表示应切换到下一个提供商,False 表示直接抛出异常。
+
+        检查异常的 HTTP 状态码或错误消息关键词,识别常见的限流、
+        认证失败、超时等瞬态错误。
+        """
         code = getattr(exc, "status_code", None)
+        # 检查 HTTP 状态码:401未授权、429限流、5xx服务器错误等
         if isinstance(code, int) and code in {
             401,
             402,
@@ -157,6 +218,7 @@ class LLMFailoverPlugin(Star):
             504,
         }:
             return True
+        # 检查错误消息关键词
         message = str(exc).lower()
         keywords = [
             "rate limit",
@@ -171,12 +233,28 @@ class LLMFailoverPlugin(Star):
         return any(keyword in message for keyword in keywords)
 
     async def _execute_with_failover(self, primary, *args, **kwargs):
+        """执行带故障转移的 LLM 调用。
+
+        Args:
+            primary: 当前主提供商实例。
+            *args, **kwargs: 传递给 text_chat 的原始参数。
+
+        Returns:
+            成功提供商的 LLMResponse 对象。
+
+        Raises:
+            最后一个失败的异常,或 RuntimeError(无可用提供商)。
+
+        按配置或默认顺序依次调用提供商,遇到瞬态错误时自动切换,
+        直到成功或耗尽所有候选提供商。
+        """
         order = self._iter_fallback_providers(primary)
         errors = []
         prompt_preview = self._get_prompt_preview(args, kwargs)
 
         for index, provider in enumerate(order):
             provider_id = provider.provider_config.get("id", "unknown")
+            # 获取该提供商的原始 text_chat 方法
             original_call = getattr(
                 provider, "_llm_failover_original_text_chat", provider.text_chat
             )
@@ -186,23 +264,27 @@ class LLMFailoverPlugin(Star):
             )
             try:
                 result = await original_call(*args, **kwargs)
+                # 成功返回,记录日志并返回结果
                 if isinstance(result, LLMResponse):
                     self._log_failover_result(provider_id, result, errors)
                 else:
                     self._log_failover_result(provider_id, None, errors)
                 return result
             except Exception as exc:
+                # 判断是否应该故障转移
                 if self._should_failover(exc) and index < len(order) - 1:
                     errors.append((provider_id, exc))
                     self._log_failover(
                         f"提供商 {provider_id} 异常: {type(exc).__name__} {exc}，尝试下一个提供商。"
                     )
                     continue
+                # 无法继续故障转移,抛出异常
                 self._log_failover(
                     f"提供商 {provider_id} 异常且无法继续故障转移: {type(exc).__name__} {exc}"
                 )
                 raise
 
+        # 所有提供商均失败
         if errors:
             summary = "; ".join(
                 f"{pid}: {type(exc).__name__} {exc}" for pid, exc in errors
@@ -215,12 +297,28 @@ class LLMFailoverPlugin(Star):
     async def _execute_stream_with_failover(
         self, primary, *args, **kwargs
     ) -> AsyncGenerator[Any, None]:
+        """执行带故障转移的流式 LLM 调用。
+
+        Args:
+            primary: 当前主提供商实例。
+            *args, **kwargs: 传递给 text_chat_stream 的原始参数。
+
+        Yields:
+            成功提供商的响应块(chunk)。
+
+        Raises:
+            最后一个失败的异常,或 RuntimeError(无可用提供商)。
+
+        流式场景下,一旦已有输出则不再切换(避免混流),
+        否则按配置或默认顺序依次尝试提供商。
+        """
         order = self._iter_fallback_providers(primary)
         errors = []
         prompt_preview = self._get_prompt_preview(args, kwargs)
 
         for index, provider in enumerate(order):
             provider_id = provider.provider_config.get("id", "unknown")
+            # 获取原始流式聊天方法或普通聊天方法作为降级
             original_stream = getattr(
                 provider,
                 "_llm_failover_original_text_chat_stream",
@@ -247,27 +345,31 @@ class LLMFailoverPlugin(Star):
 
             try:
                 if original_stream:
+                    # 调用流式方法
                     async for chunk in original_stream(*args, **kwargs):
                         if first_piece is None:
                             first_piece = chunk
                         emitted = True
                         yield chunk
                 else:
+                    # 降级使用普通聊天方法
                     result = await original_call(*args, **kwargs)
                     first_piece = result
                     emitted = True
                     yield result
 
+                # 流式输出成功完成
                 self._log_failover_result(provider_id, first_piece, errors)
                 return
             except Exception as exc:
                 if emitted:
-                    # 流式场景一旦已有输出，为避免混流不再切换，直接抛出。
+                    # 已有输出,为避免混流不再切换,直接抛出异常
                     self._log_failover(
                         f"提供商 {provider_id} 已输出部分内容，异常后停止切换: {type(exc).__name__} {exc}"
                     )
                     raise
 
+                # 判断是否应该故障转移
                 if self._should_failover(exc) and index < len(order) - 1:
                     errors.append((provider_id, exc))
                     self._log_failover(
@@ -275,11 +377,13 @@ class LLMFailoverPlugin(Star):
                     )
                     continue
 
+                # 无法继续故障转移,抛出异常
                 self._log_failover(
                     f"提供商 {provider_id} 流式异常且无法继续故障转移: {type(exc).__name__} {exc}"
                 )
                 raise
 
+        # 所有提供商均失败
         if errors:
             summary = "; ".join(
                 f"{pid}: {type(exc).__name__} {exc}" for pid, exc in errors
