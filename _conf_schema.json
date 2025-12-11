@@ -1,0 +1,13 @@
+{
+  "provider_order": {
+    "description": "自定义故障转移提供商顺序，按前到后的顺序依次尝试",
+    "type": "list",
+    "hint": "填写 Provider ID 列表，未在列表中的聊天 Provider 会自动追加在末尾；首位即为首选提供商。",
+    "default": [],
+    "items": {
+      "description": "Provider ID（可在模型配置中查看）",
+      "type": "string",
+      "hint": "示例：openai_primary"
+    }
+  }
+}
