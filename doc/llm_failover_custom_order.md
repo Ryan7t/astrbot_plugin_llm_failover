@@ -13,7 +13,8 @@
 - 新增 `_conf_schema.json`，暴露 `provider_order` 列表配置，让管理面板可直接维护自定义顺序。
 - `LLMFailoverPlugin` 接收并存储插件配置，新增 `_normalize_provider_order` 与 `_get_provider_id`，保证对配置和 Provider 的统一解析。
 - `_iter_fallback_providers` 通过 `_sort_providers` 在存在配置时完全按照用户指定的序列排序，未配置的 Provider 按原顺序追加，彻底摆脱 primary 默认置首的依赖。
-- 安装日志输出采用重排后的序列，便于核对实际生效顺序。
+- 安装日志输出采用重排后的序列，便于核对实际生效顺序；增加大小写无关匹配并修复逗号分隔字符串被覆盖的解析缺陷，确保配置顺序真实生效。
+- 重绑已有 Provider 的 `text_chat`/`text_chat_stream` 包装，避免热更新后仍使用旧实例的排序逻辑，保证配置变更即时生效。
 
 ## 优缺点与结论
 - 优点：首选及后备顺序可视化可配，配置生效后故障转移顺序与业务期望一致；未配置的提供商自动兜底追加，避免遗漏导致不可用。

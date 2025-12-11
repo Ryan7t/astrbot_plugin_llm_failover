@@ -15,16 +15,17 @@ from astrbot.core.provider.entities import LLMResponse, ProviderType
     "llm_failover",
     "Wanbot Team",
     "为聊天类模型提供商添加自动故障转移能力",
-    "1.1.0",
+    "1.1.1",
 )
 class LLMFailoverPlugin(Star):
     def __init__(self, context: Context, config: Any | None = None):
         super().__init__(context)
         self.config = config or {}
         # 自定义顺序配置会在启动时解析，允许完全重排首选提供商。
-        self._configured_provider_order = self._normalize_provider_order(
-            self.config.get("provider_order", [])
-        )
+        (
+            self._configured_provider_order,
+            self._configured_provider_order_keys,
+        ) = self._normalize_provider_order(self.config.get("provider_order", []))
         self._log_path = Path(__file__).resolve().parent / "llm_failover.log"
         self._log("LLM Failover 插件初始化，准备安装故障转移包装。")
         self._install_provider_failover()
@@ -60,21 +61,21 @@ class LLMFailoverPlugin(Star):
             return
 
         for provider in providers:
+            # 始终重绑包装以确保新配置立即生效，依赖缓存的原始实现避免多层嵌套。
             text_wrapped = getattr(provider, "_llm_failover_text_wrapped", False)
             stream_wrapped = getattr(provider, "_llm_failover_stream_wrapped", False)
 
             if not hasattr(provider, "_llm_failover_original_text_chat"):
                 provider._llm_failover_original_text_chat = provider.text_chat
 
-            if not text_wrapped:
-                # 仅替换普通聊天方法，保留原始实现以便切回或调试。
-                async def wrapper(p_self, *args, **kwargs):
-                    return await self._execute_with_failover(p_self, *args, **kwargs)
+            # 仅替换普通聊天方法，保留原始实现以便切回或调试。
+            async def wrapper(p_self, *args, **kwargs):
+                return await self._execute_with_failover(p_self, *args, **kwargs)
 
-                provider.text_chat = types.MethodType(wrapper, provider)
-                provider._llm_failover_text_wrapped = True
+            provider.text_chat = types.MethodType(wrapper, provider)
+            provider._llm_failover_text_wrapped = True
 
-            if hasattr(provider, "text_chat_stream") and not stream_wrapped:
+            if hasattr(provider, "text_chat_stream"):
                 if not hasattr(
                     provider, "_llm_failover_original_text_chat_stream"
                 ):
@@ -101,10 +102,15 @@ class LLMFailoverPlugin(Star):
 
         sorted_for_log = self._sort_providers(providers, primary=None)
         order_desc = ", ".join(self._get_provider_id(provider) for provider in sorted_for_log)
+        missing_ids = self._find_missing_configured_ids(providers)
         if self._configured_provider_order:
             self._log_failover(
                 f"已启用故障转移，使用自定义顺序: {order_desc}"
             )
+            if missing_ids:
+                self._log_failover(
+                    f"注意: 以下配置的提供商 ID 未找到，将按原始顺序追加: {', '.join(missing_ids)}"
+                )
         else:
             self._log_failover(f"已启用故障转移，当前提供商顺序: {order_desc}")
 
@@ -132,13 +138,15 @@ class LLMFailoverPlugin(Star):
             if provider.meta().provider_type == ProviderType.CHAT_COMPLETION
         ]
 
-    def _normalize_provider_order(self, raw_order: Any) -> list[str]:
-        # 支持列表或逗号分隔字符串，保持配置的顺序语义。
+    def _normalize_provider_order(
+        self, raw_order: Any
+    ) -> tuple[list[str], list[str]]:
+        # 支持列表或逗号分隔字符串，保持配置的顺序语义，内部用小写匹配。
         if not raw_order:
-            return []
+            return [], []
         if isinstance(raw_order, str):
-            return [item.strip() for item in raw_order.split(",") if item.strip()]
-        if isinstance(raw_order, list):
+            items = [item.strip() for item in raw_order.split(",") if item.strip()]
+        elif isinstance(raw_order, list):
             cleaned = []
             for item in raw_order:
                 try:
@@ -147,15 +155,26 @@ class LLMFailoverPlugin(Star):
                     continue
                 if text:
                     cleaned.append(text)
-            return cleaned
-        return []
+            items = cleaned
+        else:
+            items = []
+
+        normalized_keys = [self._normalize_id(item) for item in items]
+        return items, normalized_keys
 
     def _get_provider_id(self, provider: Any) -> str:
         # 统一获取 Provider 标识，优先配置 ID，其次元数据。
         try:
-            provider_id = getattr(provider, "provider_config", {}).get("id")
+            config_dict = getattr(provider, "provider_config", {}) or {}
         except Exception:
-            provider_id = None
+            config_dict = {}
+
+        provider_id = (
+            config_dict.get("id")
+            or config_dict.get("provider_id")
+            or config_dict.get("name")
+            or config_dict.get("model")
+        )
         if provider_id:
             return str(provider_id)
         meta = getattr(provider, "meta", None)
@@ -164,21 +183,29 @@ class LLMFailoverPlugin(Star):
                 meta_obj = meta()
                 meta_id = getattr(meta_obj, "id", None) or getattr(
                     meta_obj, "name", None
-                )
+                ) or getattr(meta_obj, "provider_name", None)
                 if meta_id:
                     return str(meta_id)
             except Exception:
                 pass
         return "unknown"
 
+    def _normalize_id(self, identifier: str) -> str:
+        # 规范化 ID 用于匹配，避免大小写或空格差异导致配置未生效。
+        try:
+            return identifier.strip().lower()
+        except Exception:
+            return ""
+
     def _sort_providers(self, providers: list[Any], primary: Any | None):
         # 当存在配置时完全按照配置顺序优先，未配置项按原始顺序追加。
         if self._configured_provider_order:
             provider_map = {
-                self._get_provider_id(provider): provider for provider in providers
+                self._normalize_id(self._get_provider_id(provider)): provider
+                for provider in providers
             }
             ordered = []
-            for provider_id in self._configured_provider_order:
+            for provider_id in self._configured_provider_order_keys:
                 provider = provider_map.get(provider_id)
                 if provider and provider not in ordered:
                     ordered.append(provider)
@@ -200,6 +227,21 @@ class LLMFailoverPlugin(Star):
     def _iter_fallback_providers(self, primary):
         providers = self._get_chat_providers()
         return self._sort_providers(providers, primary)
+
+    def _find_missing_configured_ids(self, providers: list[Any]) -> list[str]:
+        # 用于记录配置中未匹配到的 ID，便于运维核对。
+        if not self._configured_provider_order:
+            return []
+        provider_keys = {
+            self._normalize_id(self._get_provider_id(provider)) for provider in providers
+        }
+        missing = []
+        for raw, key in zip(
+            self._configured_provider_order, self._configured_provider_order_keys
+        ):
+            if key and key not in provider_keys:
+                missing.append(raw)
+        return missing
 
     def _get_prompt_preview(self, args: tuple, kwargs: dict) -> str:
         if args:
