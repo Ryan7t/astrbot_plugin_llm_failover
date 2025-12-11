@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from astrbot.api import logger as astr_logger
+from astrbot.api import AstrBotConfig, logger as astr_logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.entities import LLMResponse, ProviderType
@@ -18,8 +18,11 @@ from astrbot.core.provider.entities import LLMResponse, ProviderType
     "1.0.0",
 )
 class LLMFailoverPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(
+        self, context: Context, config: AstrBotConfig | None = None
+    ):
         super().__init__(context)
+        self.config = config  # 保存插件配置，后续用于自定义故障转移顺序。
         self._log_path = Path(__file__).resolve().parent / "llm_failover.log"
         self._log("LLM Failover 插件初始化，准备安装故障转移包装。")
         self._install_provider_failover()
@@ -42,6 +45,52 @@ class LLMFailoverPlugin(Star):
     def _log_failover(self, message: str):
         astr_logger.info(f"[llm_failover][LLM] {message}")
         self._log(f"[LLM切换] {message}")
+
+    def _load_priority_ids(self) -> list[str]:
+        """从插件配置读取自定义的 Provider 顺序，兼容字符串和列表格式。"""
+        cfg = self.config or {}
+        raw_order = cfg.get("priority_order", []) if hasattr(cfg, "get") else []
+        if isinstance(raw_order, str):
+            return [
+                item.strip()
+                for item in raw_order.replace("\n", ",").split(",")
+                if item.strip()
+            ]
+        if isinstance(raw_order, list):
+            return [str(item).strip() for item in raw_order if str(item).strip()]
+        return []
+
+    def _sort_providers(self, providers: list, primary):
+        """
+        根据配置重新排列 Provider 顺序：
+        - 配置存在时完全按配置顺序排序，其余 Provider 追加在末尾；
+        - 未配置时沿用“当前 Provider 优先”的默认顺序。
+        """
+        priority_ids = self._load_priority_ids()
+        if priority_ids:
+            id_map = {
+                provider.provider_config.get("id", "unknown"): provider
+                for provider in providers
+            }
+            ordered = []
+            for provider_id in priority_ids:
+                provider = id_map.get(provider_id)
+                if provider and provider not in ordered:
+                    ordered.append(provider)
+            for provider in providers:
+                if provider not in ordered:
+                    ordered.append(provider)
+            return ordered
+
+        order = []
+        if primary:
+            order.append(primary)
+        for provider in providers:
+            if provider is primary:
+                continue
+            if provider not in order:
+                order.append(provider)
+        return order if order else [primary]
 
     def _install_provider_failover(self):
         try:
@@ -98,10 +147,16 @@ class LLMFailoverPlugin(Star):
             ):
                 provider._llm_failover_installed = True
 
+        sorted_for_log = self._sort_providers(providers, providers[0])
         order_desc = ", ".join(
-            provider.provider_config.get("id", "unknown") for provider in providers
+            provider.provider_config.get("id", "unknown") for provider in sorted_for_log
         )
-        self._log_failover(f"已启用故障转移，当前提供商顺序: {order_desc}")
+        if self._load_priority_ids():
+            self._log_failover(f"已启用故障转移，使用自定义顺序: {order_desc}")
+        else:
+            self._log_failover(
+                f"已启用故障转移，当前提供商顺序: {order_desc}"
+            )
 
     def _log_failover_result(
         self, provider_id: str, response: Any | None, errors: list
@@ -125,15 +180,7 @@ class LLMFailoverPlugin(Star):
             for provider in self.context.get_all_providers()
             if provider.meta().provider_type == ProviderType.CHAT_COMPLETION
         ]
-        order = []
-        if primary:
-            order.append(primary)
-        for provider in providers:
-            if provider is primary:
-                continue
-            if provider not in order:
-                order.append(provider)
-        return order if order else [primary]
+        return self._sort_providers(providers, primary)
 
     def _get_prompt_preview(self, args: tuple, kwargs: dict) -> str:
         if args:

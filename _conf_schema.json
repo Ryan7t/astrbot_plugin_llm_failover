@@ -1,0 +1,8 @@
+{
+  "priority_order": {
+    "description": "故障转移优先级（按 Provider ID 填写，首位为首选）",
+    "type": "list",
+    "hint": "顺序覆盖默认主备顺序，未填写的 Provider 会自动排到末尾",
+    "default": []
+  }
+}
