@@ -15,7 +15,7 @@ from astrbot.core.provider.entities import LLMResponse, ProviderType
     "llm_failover",
     "Wanbot Team",
     "为聊天类模型提供商添加自动故障转移能力",
-    "1.1.1",
+    "1.1.2",
 )
 class LLMFailoverPlugin(Star):
     def __init__(self, context: Context, config: Any | None = None):
@@ -71,7 +71,13 @@ class LLMFailoverPlugin(Star):
             text_wrapped = getattr(provider, "_llm_failover_text_wrapped", False)
             stream_wrapped = getattr(provider, "_llm_failover_stream_wrapped", False)
 
-            if not hasattr(provider, "_llm_failover_original_text_chat"):
+            if hasattr(provider, "_llm_failover_original_text_chat"):
+                # 先恢复到原始实现，再重新包裹，避免旧 wrapper 残留。
+                try:
+                    provider.text_chat = provider._llm_failover_original_text_chat
+                except Exception:
+                    pass
+            else:
                 provider._llm_failover_original_text_chat = provider.text_chat
 
             # 仅替换普通聊天方法，保留原始实现以便切回或调试。
@@ -82,9 +88,15 @@ class LLMFailoverPlugin(Star):
             provider._llm_failover_text_wrapped = True
 
             if hasattr(provider, "text_chat_stream"):
-                if not hasattr(
-                    provider, "_llm_failover_original_text_chat_stream"
-                ):
+                if hasattr(provider, "_llm_failover_original_text_chat_stream"):
+                    # 同理先恢复原始流式实现，再重绑。
+                    try:
+                        provider.text_chat_stream = (
+                            provider._llm_failover_original_text_chat_stream
+                        )
+                    except Exception:
+                        pass
+                else:
                     provider._llm_failover_original_text_chat_stream = (
                         provider.text_chat_stream
                     )
