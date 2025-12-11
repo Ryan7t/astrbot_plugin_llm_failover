@@ -1,0 +1,11 @@
+{
+  "provider_order": {
+    "description": "自定义聊天提供商的故障转移顺序，按优先级从上到下填写提供商 ID",
+    "type": "list",
+    "hint": "示例：[\"openai\", \"gemini\", \"deepseek\"]；留空则按当前使用的提供商顺序执行",
+    "items": {
+      "type": "string",
+      "description": "Provider ID"
+    }
+  }
+}

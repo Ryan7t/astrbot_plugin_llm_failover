@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from astrbot.api import logger as astr_logger
+from astrbot.api import AstrBotConfig, logger as astr_logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.entities import LLMResponse, ProviderType
@@ -18,8 +18,13 @@ from astrbot.core.provider.entities import LLMResponse, ProviderType
     "1.0.0",
 )
 class LLMFailoverPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        self.config = config or AstrBotConfig()
+        # 记录用户配置的故障转移顺序，配置为空时保持框架默认顺序。
+        self._provider_order = self._normalize_provider_order(
+            self.config.get("provider_order")
+        )
         self._log_path = Path(__file__).resolve().parent / "llm_failover.log"
         self._log("LLM Failover 插件初始化，准备安装故障转移包装。")
         self._install_provider_failover()
@@ -43,6 +48,58 @@ class LLMFailoverPlugin(Star):
         astr_logger.info(f"[llm_failover][LLM] {message}")
         self._log(f"[LLM切换] {message}")
 
+    def _normalize_provider_order(self, raw_order: Any) -> list[str]:
+        if not raw_order or not isinstance(raw_order, list):
+            return []
+        normalized = []
+        for item in raw_order:
+            value = str(item).strip()
+            if not value or value in normalized:
+                continue
+            normalized.append(value)
+        return normalized
+
+    def _get_provider_id(self, provider) -> str:
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        config_id = provider_config.get("id")
+        if config_id:
+            return str(config_id)
+        meta_func = getattr(provider, "meta", None)
+        if callable(meta_func):
+            meta_obj = meta_func()
+            meta_id = getattr(meta_obj, "id", None) or getattr(
+                meta_obj, "provider_name", None
+            ) or getattr(meta_obj, "name", None)
+            if meta_id:
+                return str(meta_id)
+        return provider.__class__.__name__
+
+    def _ordered_providers(self, providers: list, primary) -> list:
+        if not providers:
+            return []
+
+        if self._provider_order:
+            id_map = {self._get_provider_id(p): p for p in providers}
+            ordered = []
+            for pid in self._provider_order:
+                provider = id_map.get(pid)
+                if provider and provider not in ordered:
+                    ordered.append(provider)
+
+            # 未在配置中的 provider 仍然参与故障转移，但排在配置顺序之后。
+            for provider in providers:
+                if provider not in ordered:
+                    ordered.append(provider)
+            return ordered
+
+        order = []
+        if primary:
+            order.append(primary)
+        for provider in providers:
+            if provider not in order:
+                order.append(provider)
+        return order
+
     def _install_provider_failover(self):
         try:
             providers = [
@@ -57,6 +114,16 @@ class LLMFailoverPlugin(Star):
         if len(providers) <= 1:
             self._log_failover("提供商数量不足，不启用故障转移。")
             return
+
+        available_ids = {self._get_provider_id(provider) for provider in providers}
+        if self._provider_order:
+            missing_ids = [
+                pid for pid in self._provider_order if pid not in available_ids
+            ]
+            if missing_ids:
+                self._log_failover(
+                    f"配置的提供商未找到，将跳过: {', '.join(missing_ids)}"
+                )
 
         for provider in providers:
             text_wrapped = getattr(provider, "_llm_failover_text_wrapped", False)
@@ -98,8 +165,19 @@ class LLMFailoverPlugin(Star):
             ):
                 provider._llm_failover_installed = True
 
+        preferred_primary = None
+        if self._provider_order:
+            id_map = {self._get_provider_id(p): p for p in providers}
+            for pid in self._provider_order:
+                if pid in id_map:
+                    preferred_primary = id_map[pid]
+                    break
+        if not preferred_primary and providers:
+            preferred_primary = providers[0]
+
+        ordered_for_log = self._ordered_providers(providers, preferred_primary)
         order_desc = ", ".join(
-            provider.provider_config.get("id", "unknown") for provider in providers
+            self._get_provider_id(provider) for provider in ordered_for_log
         )
         self._log_failover(f"已启用故障转移，当前提供商顺序: {order_desc}")
 
@@ -125,15 +203,12 @@ class LLMFailoverPlugin(Star):
             for provider in self.context.get_all_providers()
             if provider.meta().provider_type == ProviderType.CHAT_COMPLETION
         ]
-        order = []
+        ordered = self._ordered_providers(providers, primary)
+        if ordered:
+            return ordered
         if primary:
-            order.append(primary)
-        for provider in providers:
-            if provider is primary:
-                continue
-            if provider not in order:
-                order.append(provider)
-        return order if order else [primary]
+            return [primary]
+        return []
 
     def _get_prompt_preview(self, args: tuple, kwargs: dict) -> str:
         if args:
@@ -176,7 +251,7 @@ class LLMFailoverPlugin(Star):
         prompt_preview = self._get_prompt_preview(args, kwargs)
 
         for index, provider in enumerate(order):
-            provider_id = provider.provider_config.get("id", "unknown")
+            provider_id = self._get_provider_id(provider)
             original_call = getattr(
                 provider, "_llm_failover_original_text_chat", provider.text_chat
             )
@@ -220,7 +295,7 @@ class LLMFailoverPlugin(Star):
         prompt_preview = self._get_prompt_preview(args, kwargs)
 
         for index, provider in enumerate(order):
-            provider_id = provider.provider_config.get("id", "unknown")
+            provider_id = self._get_provider_id(provider)
             original_stream = getattr(
                 provider,
                 "_llm_failover_original_text_chat_stream",
