@@ -50,6 +50,12 @@ class LLMFailoverPlugin(Star):
         self._log(f"[LLM切换] {message}")
 
     def _install_provider_failover(self):
+        # 每次安装前重新解析配置，确保最新的自定义顺序即时生效。
+        (
+            self._configured_provider_order,
+            self._configured_provider_order_keys,
+        ) = self._normalize_provider_order(self.config.get("provider_order", []))
+
         try:
             providers = self._get_chat_providers()
         except Exception as exc:
